@@ -1,0 +1,402 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// HDR output: one vec4 (RGBA float32) per pixel — tone-mapped on CPU
+layout(binding = 0, std430) writeonly buffer OutBuf {
+    vec4 pixels[];
+};
+
+// Must match PushConstants struct in renderer_vk.cpp exactly (4-byte packed)
+layout(push_constant) uniform PC {
+    int   width, height;
+    float a;
+    float r_obs, theta_obs, fov_h;
+    float r_isco, r_out, mdot, dust_opacity, M_solar;
+    uint  turb_seed, star_seed;
+    int   max_steps;
+    float r_escape;
+} pc;
+
+const float PI = 3.14159265358979;
+
+// ===========================================================================
+// Kerr metric — Boyer-Lindquist, G=c=M=1
+// ===========================================================================
+
+void kerr_metric(float r, float th,
+                 out float gtt, out float grr,
+                 out float gthth, out float gphph, out float gtph) {
+    float s2 = sin(th)*sin(th), c2 = cos(th)*cos(th);
+    float r2 = r*r, a2 = pc.a*pc.a;
+    float Sig = r2 + a2*c2;
+    float Del = r2 - 2.0*r + a2;
+    gtt   = -(1.0 - 2.0*r/Sig);
+    grr   = Sig/Del;
+    gthth = Sig;
+    gphph = (r2 + a2 + 2.0*a2*r*s2/Sig)*s2;
+    gtph  = 2.0*pc.a*r*s2/Sig;
+}
+
+void inv_metric(float r, float th,
+                out float gtt, out float grr,
+                out float gthth, out float gphph, out float gtph) {
+    float s2 = sin(th)*sin(th), c2 = cos(th)*cos(th);
+    float r2 = r*r, a2 = pc.a*pc.a;
+    float Sig = r2 + a2*c2;
+    float Del = r2 - 2.0*r + a2;
+    float XI  = (r2+a2)*(r2+a2) - Del*a2*s2;
+    gtt   = -XI/(Sig*Del);
+    grr   = Del/Sig;
+    gthth = 1.0/Sig;
+    gphph = (Del - a2*s2)/(Sig*Del*max(s2, 1e-6));
+    gtph  = 2.0*pc.a*r/(Sig*Del);
+}
+
+void dmetric_dr(float r, float th,
+                out float dtt, out float drr,
+                out float dthth, out float dphph, out float dtph) {
+    float s  = sin(th), c = cos(th);
+    float s2 = s*s, c2 = c*c, r2 = r*r, a2 = pc.a*pc.a;
+    float Sig = r2 + a2*c2;
+    float Del = r2 - 2.0*r + a2;
+    float Sm2 = a2*c2 - r2;    // Σ - 2r²
+    float Sig2 = Sig*Sig, Del2 = Del*Del;
+    dtt   =  2.0*Sm2/Sig2;
+    drr   =  2.0*(r*Del - (r-1.0)*Sig)/Del2;
+    dthth =  2.0*r;
+    dtph  =  2.0*pc.a*s2*Sm2/Sig2;
+    dphph =  2.0*r*s2 + 2.0*a2*s2*s2*Sm2/Sig2;
+}
+
+void dmetric_dth(float r, float th,
+                 out float dtt, out float drr,
+                 out float dthth, out float dphph, out float dtph) {
+    float s  = sin(th), c = cos(th);
+    float s2 = s*s, c2 = c*c, r2 = r*r, a2 = pc.a*pc.a;
+    float Sig = r2 + a2*c2;
+    float Del = r2 - 2.0*r + a2;
+    float sin2th = sin(2.0*th);
+    float Sig2   = Sig*Sig;
+    dtt   =  2.0*r*a2*sin2th/Sig2;
+    drr   = -a2*sin2th/Del;
+    dthth = -a2*sin2th;
+    dtph  =  2.0*pc.a*r*(r2+a2)*sin2th/Sig2;
+    float bk = (r2+a2) + 2.0*a2*r*s2*(2.0*r2 + a2*(1.0+c2))/Sig2;
+    dphph = sin2th*bk;
+}
+
+// Raise covariant momentum: p^μ = g^μν p_ν
+void raise_idx(float r, float th,
+               float pt, float pr, float pth, float pph,
+               out float upt, out float upr, out float upth, out float upph) {
+    float gtt, grr, gthth, gphph, gtph;
+    inv_metric(r, th, gtt, grr, gthth, gphph, gtph);
+    upt  = gtt*pt  + gtph*pph;
+    upr  = grr*pr;
+    upth = gthth*pth;
+    upph = gtph*pt + gphph*pph;
+}
+
+// ===========================================================================
+// Geodesic integration — Hamiltonian RK4
+// State: vec4(r, theta, p_r, p_theta)
+// Constants: p_t (=-E, conserved), p_ph (=L, conserved)
+// ===========================================================================
+
+vec4 geodesic_rhs(vec4 st, float p_t, float p_ph) {
+    float r = st.x, th = st.y, pr = st.z, pth = st.w;
+    float upt, upr, upth, upph;
+    raise_idx(r, th, p_t, pr, pth, p_ph, upt, upr, upth, upph);
+
+    float dtt, drr, dthth, dphph, dtph;
+    dmetric_dr(r, th, dtt, drr, dthth, dphph, dtph);
+    float fp_r = 0.5*(dtt*upt*upt + drr*upr*upr + dthth*upth*upth
+                    + dphph*upph*upph + 2.0*dtph*upt*upph);
+
+    dmetric_dth(r, th, dtt, drr, dthth, dphph, dtph);
+    float fp_th = 0.5*(dtt*upt*upt + drr*upr*upr + dthth*upth*upth
+                     + dphph*upph*upph + 2.0*dtph*upt*upph);
+
+    return vec4(upr, upth, fp_r, fp_th);
+}
+
+vec4 rk4_step(vec4 st, float p_t, float p_ph, float dl) {
+    vec4 k1 = geodesic_rhs(st,            p_t, p_ph);
+    vec4 k2 = geodesic_rhs(st+0.5*dl*k1,  p_t, p_ph);
+    vec4 k3 = geodesic_rhs(st+0.5*dl*k2,  p_t, p_ph);
+    vec4 k4 = geodesic_rhs(st+dl*k3,      p_t, p_ph);
+    return st + (dl/6.0)*(k1 + 2.0*k2 + 2.0*k3 + k4);
+}
+
+float step_size(float r, float r_h) {
+    float dr = r - r_h;
+    if (dr < 0.05) return 0.003;
+    if (dr < 0.5 ) return 0.020;
+    if (dr < 2.0 ) return 0.10;
+    if (dr < 6.0 ) return 0.30;
+    if (r  > 50.0) return 1.50;
+    return 0.50;
+}
+
+// ===========================================================================
+// Noise — MRI disk turbulence
+// ===========================================================================
+
+uint hash_u(uint x) {
+    x ^= x >> 16u; x *= 0x45d9f3bu; x ^= x >> 16u; return x;
+}
+
+float hash_f(uint seed, int ix, int iy) {
+    uint s = seed ^ (uint(ix)*2654435761u) ^ (uint(iy)*805459861u);
+    return float(hash_u(s)) / 4294967296.0;
+}
+
+float smooth_t(float t) { return t*t*(3.0-2.0*t); }
+
+float vnoise(uint seed, float u, float v) {
+    int iu = int(floor(u)), iv = int(floor(v));
+    float fu = fract(u), fv = fract(v);
+    return mix(mix(hash_f(seed,iu,iv),   hash_f(seed,iu+1,iv),   smooth_t(fu)),
+               mix(hash_f(seed,iu,iv+1), hash_f(seed,iu+1,iv+1), smooth_t(fu)),
+               smooth_t(fv));
+}
+
+float mri_noise(float r, float phi) {
+    float u = r*0.4, v = phi/(2.0*PI)*12.0;
+    float n=0.0, amp=1.0, freq=1.0, tot=0.0;
+    for (int i=0;i<5;i++) {
+        n   += amp*vnoise(pc.turb_seed+uint(i)*7919u, u*freq, v*freq);
+        tot += amp; amp*=0.5; freq*=2.1;
+    }
+    return n/tot;
+}
+
+// ===========================================================================
+// Blackbody color (normalized to D65 white at 6504K)
+// ===========================================================================
+
+float planck(float lam, float T) {
+    if (T <= 0.0) return 0.0;
+    float x = 14387769.0/(lam*T);
+    if (x > 600.0) return 0.0;
+    return 1.0/(pow(lam,5.0)*(exp(x)-1.0));
+}
+
+vec3 blackbody(float T) {
+    float R  = planck(600,T)*.15+planck(630,T)*.40+planck(660,T)*.35+planck(700,T)*.10;
+    float G  = planck(510,T)*.10+planck(540,T)*.35+planck(570,T)*.40+planck(600,T)*.15;
+    float B  = planck(420,T)*.15+planck(450,T)*.45+planck(480,T)*.35+planck(510,T)*.05;
+    const float Tw = 6504.0;
+    float Rw = planck(600,Tw)*.15+planck(630,Tw)*.40+planck(660,Tw)*.35+planck(700,Tw)*.10;
+    float Gw = planck(510,Tw)*.10+planck(540,Tw)*.35+planck(570,Tw)*.40+planck(600,Tw)*.15;
+    float Bw = planck(420,Tw)*.15+planck(450,Tw)*.45+planck(480,Tw)*.35+planck(510,Tw)*.05;
+    return vec3(R/max(Rw,1e-30), G/max(Gw,1e-30), B/max(Bw,1e-30));
+}
+
+// ===========================================================================
+// Accretion disk emission
+// ===========================================================================
+
+vec3 disk_color(float r_hit, float phi_hit, float p_ph, float p_t) {
+    if (r_hit <= pc.r_isco) return vec3(0.0);
+    float f = 1.0 - sqrt(pc.r_isco/r_hit);
+    if (f <= 0.0) return vec3(0.0);
+
+    // Novikov-Thorne temperature profile
+    float T_peak = 3.0e7 * pow(pc.mdot, 0.25) * pow(10.0/pc.M_solar, 0.25);
+    float T0 = T_peak * pow(pc.r_isco/r_hit, 0.75) * pow(f, 0.25);
+
+    // MRI turbulence — modulate ±40%
+    float T = T0 * (0.6 + 0.8*mri_noise(r_hit, phi_hit));
+
+    // Relativistic correction at equatorial (θ=π/2, Σ=r²)
+    float r2 = r_hit*r_hit, a2 = pc.a*pc.a;
+    float Omega_K = 1.0/(pow(r_hit, 1.5) + pc.a);
+    float g_tt    = -(1.0 - 2.0/r_hit);               // at Σ=r², M=1
+    float g_tph   =  2.0*pc.a/r_hit;
+    float g_phph  =  r2 + a2 + 2.0*a2/r_hit;
+
+    float denom = -(g_tt + 2.0*g_tph*Omega_K + g_phph*Omega_K*Omega_K);
+    if (denom <= 0.0) return vec3(0.0);
+    float ut  = 1.0/sqrt(denom);
+    float uph = Omega_K*ut;
+
+    // Conserved photon energy at emission vs. at observer (E_obs=1)
+    float E_local = -(p_t*ut + p_ph*uph);
+    if (E_local <= 0.0) return vec3(0.0);
+
+    float g_freq = 1.0/E_local;    // ν_obs/ν_emit
+    float T_obs  = T * g_freq;
+    if (T_obs < 800.0) return vec3(0.0);
+
+    // Specific intensity scales as ν^3 ∝ g_freq^3, plus bandwidth: g_freq^4 total
+    float brightness = pow(g_freq, 4.0);
+
+    // Dust extinction on receding (redshifted) side
+    if (pc.dust_opacity > 0.0 && g_freq < 1.0) {
+        brightness *= exp(-pc.dust_opacity*(1.0-g_freq)*4.0);
+    }
+
+    return blackbody(T_obs)*brightness;
+}
+
+// ===========================================================================
+// Procedural star field — grid-cell approach, O(27) per lookup
+// ===========================================================================
+
+vec3 star_field(float theta, float phi) {
+    // Very faint galactic plane glow
+    float lat  = abs(theta - PI*0.5);
+    vec3  col  = vec3(1.0,0.85,0.75)*0.003*exp(-lat*lat*5.0);
+
+    // Grid cells of ~0.1 rad
+    const float cell = 0.10;
+    int ith = int(floor(theta/cell));
+    int iph = int(floor(phi  /cell));
+
+    // 3×3 neighborhood
+    for (int di=-1; di<=1; di++)
+    for (int dj=-1; dj<=1; dj++) {
+        int ci = ith+di, cj = iph+dj;
+        uint ch = hash_u(pc.star_seed + uint(ci)*1234567u + uint(cj)*7654321u);
+
+        int nstars = int(ch & 3u) + 1;  // 1–4 stars per cell
+        for (int k=0; k<nstars; k++) {
+            ch = hash_u(ch + uint(k)*997u);
+
+            // Star position within cell
+            float st = (float(ci) + float( ch        & 0xFFu)/256.0)*cell;
+            float sp = (float(cj) + float((ch >> 8u) & 0xFFu)/256.0)*cell;
+            ch = hash_u(ch);
+
+            float dth = theta - st;
+            float dp  = phi   - sp;
+            if (dp >  PI) dp -= 2.0*PI;
+            if (dp < -PI) dp += 2.0*PI;
+            float sinth = sin(st);
+            float dist  = sqrt(dth*dth + sinth*sinth*dp*dp);
+
+            // Apparent brightness — log-uniform, most stars dim
+            float logb = -3.0*float((ch     ) & 0xFFu)/255.0;
+            float br   = pow(10.0, logb);
+            if (((ch>>8u) & 0xFFu) < 5u) br *= 6.0+float((ch>>16u)&0xFu); // rare bright
+            ch = hash_u(ch);
+
+            // Spectral type → temperature
+            uint tp = ch % 100u;
+            float Tstar = 3700.0;
+            if      (tp < 1u)  Tstar = 38000.0;
+            else if (tp < 2u)  Tstar = 20000.0;
+            else if (tp < 4u)  Tstar =  9000.0;
+            else if (tp < 8u)  Tstar =  7000.0;
+            else if (tp < 16u) Tstar =  6000.0;
+            else if (tp < 28u) Tstar =  5000.0;
+            ch = hash_u(ch);
+            Tstar *= 0.85 + 0.30*float(ch & 0xFFu)/255.0;
+
+            // Angular radius — tiny for point-like stars
+            float rad = 0.0012 + 0.004*min(br, 1.0);
+            if (dist < rad) {
+                float w = exp(-3.0*(dist/rad)*(dist/rad));
+                col += blackbody(Tstar)*br*w;
+            }
+        }
+    }
+    return col;
+}
+
+// ===========================================================================
+// Main — one invocation per pixel
+// ===========================================================================
+
+void main() {
+    int px = int(gl_GlobalInvocationID.x);
+    int py = int(gl_GlobalInvocationID.y);
+    if (px >= pc.width || py >= pc.height) return;
+
+    float a = pc.a;
+
+    // --- ZAMO tetrad at observer ---
+    float s   = sin(pc.theta_obs), c = cos(pc.theta_obs);
+    float s2  = s*s, c2 = c*c;
+    float ro2 = pc.r_obs*pc.r_obs, a2 = a*a;
+    float Sig = ro2 + a2*c2;
+    float Del = ro2 - 2.0*pc.r_obs + a2;
+    float XI  = (ro2+a2)*(ro2+a2) - Del*a2*s2;
+
+    float alpha      = sqrt(Sig*Del/XI);
+    float omega      = 2.0*a*pc.r_obs/XI;
+    float sqrt_grr_i = sqrt(Del/Sig);        // 1/√g_rr
+    float sqrt_gth_i = 1.0/sqrt(Sig);        // 1/√g_θθ
+    float sqrt_gph   = sqrt(XI*s2/Sig);      // √g_φφ
+    float g_tph_obs  = 2.0*a*pc.r_obs*s2/Sig;
+
+    // --- Pixel → local ray direction ---
+    float aspect   = float(pc.width)/float(pc.height);
+    float half_tan = tan(pc.fov_h*0.5);
+
+    float cx = (2.0*(float(px)+0.5)/float(pc.width)  - 1.0)*half_tan;
+    float cy = (1.0 - 2.0*(float(py)+0.5)/float(pc.height))*half_tan/aspect;
+
+    // Forward = -e_r (toward BH), right = +e_φ, up = -e_θ
+    float nr  = -1.0, nth = -cy, nph = cx;
+    float inv = 1.0/sqrt(nr*nr + nth*nth + nph*nph);
+    nr *= inv; nth *= inv; nph *= inv;
+
+    // --- Initial covariant momentum ---
+    float p_t  = -alpha + nph*g_tph_obs/sqrt_gph;
+    float p_r  =  nr/sqrt_grr_i;             // = n_r √(Σ/Δ)
+    float p_th =  nth/sqrt_gth_i;            // = n_θ √Σ
+    float p_ph =  nph*sqrt_gph + 2.0*g_tph_obs/alpha;  // frame-dragging term
+
+    // Event horizon: r+ = 1 + √(1-a²)
+    float r_h = 1.0 + sqrt(max(1.0 - a*a, 0.0));
+
+    // --- Integrate geodesic (forward in λ, inward) ---
+    vec4  state = vec4(pc.r_obs, pc.theta_obs, p_r, p_th);
+    float phi   = 0.0;
+    float prev_sign = state.y - PI*0.5;
+    float prev_r    = state.x;
+
+    vec3 color = vec3(0.0);
+    bool done  = false;
+
+    for (int step = 0; step < pc.max_steps && !done; step++) {
+        float r  = state.x;
+        float th = state.y;
+
+        // Horizon: black
+        if (r <= r_h*1.001) { color = vec3(0.0); done = true; break; }
+
+        // Escaped: sample star field
+        if (r >= pc.r_escape) { color = star_field(th, phi); done = true; break; }
+
+        // Disk crossing: equatorial plane, r in [r_isco, r_out]
+        float curr_sign = th - PI*0.5;
+        if (prev_sign*curr_sign < 0.0) {
+            float r_cross = 0.5*(r + prev_r);
+            if (r_cross >= pc.r_isco && r_cross <= pc.r_out) {
+                color = disk_color(r_cross, phi, p_ph, p_t);
+                done = true; break;
+            }
+        }
+        prev_sign = curr_sign;
+        prev_r    = r;
+
+        // Update φ (needed for disk azimuth and turbulence seed)
+        float upt, upr, upth, upph;
+        raise_idx(r, th, p_t, state.z, state.w, p_ph, upt, upr, upth, upph);
+
+        float dl = step_size(r, r_h);
+        phi  += dl*upph;
+        state = rk4_step(state, p_t, p_ph, dl);
+
+        // Keep θ in (0, π)
+        if (state.y < 1e-5)      { state.y = 1e-5;    state.w =  abs(state.w); }
+        if (state.y > PI - 1e-5) { state.y = PI-1e-5; state.w = -abs(state.w); }
+    }
+
+    if (!done) color = star_field(state.y, phi);
+
+    pixels[py*pc.width + px] = vec4(color, 1.0);
+}

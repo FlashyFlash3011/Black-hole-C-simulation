@@ -13,9 +13,6 @@
 #include <cmath>
 #include <algorithm>
 #include <random>
-#ifdef _WIN32
-#  include <windows.h>
-#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Physics constants  (geometric units: G = c = M = 1)
@@ -87,8 +84,8 @@ static void printParams(const RunParams& p) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Window & camera
 // ─────────────────────────────────────────────────────────────────────────────
-static int    g_width     = 3840;
-static int    g_height    = 2160;
+static int    g_width     = 1280;
+static int    g_height    = 720;
 static float  g_azimuth   = 0.0f;
 static float  g_elevation = 0.42f;   // ~24° above equatorial
 static float  g_dist      = 26.0f;
@@ -97,8 +94,6 @@ static double g_lastX     = 0.0, g_lastY = 0.0;
 static double g_lastInput = 0.0;      // timestamp of last user interaction
 
 static RunParams g_params;            // current run parameters
-static int       g_objectType = 0;    // 0=none, 1=human, 2=light_ray
-static glm::vec3 g_objectPos;         // world position of object
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shader utilities
@@ -199,85 +194,6 @@ int main(int argc, char** argv) {
     g_params = sampleParams(seed);
     printParams(g_params);
 
-    // ── Resolution & object prompts ────────────────────────────────────
-#ifdef _WIN32
-    // mintty (MSYS2) can't pipe stdin to native .exe — use GUI dialogs instead
-    {
-        // Resolution: box 1 → 4K or lower?
-        int r1 = MessageBoxA(nullptr,
-            "Use 4K resolution (3840 x 2160)?\n\n"
-            "  Yes    = 4K  (3840 x 2160)\n"
-            "  No     = choose a lower resolution",
-            "Resolution", MB_YESNO | MB_ICONQUESTION);
-        if (r1 == IDYES) {
-            g_width = 3840; g_height = 2160;
-        } else {
-            // Box 2 → pick from three lower options
-            int r2 = MessageBoxA(nullptr,
-                "Select lower resolution:\n\n"
-                "  Yes     = 1440p  (2560 x 1440)\n"
-                "  No      = 1080p  (1920 x 1080)\n"
-                "  Cancel  = 720p   (1280 x 720)",
-                "Resolution", MB_YESNOCANCEL | MB_ICONQUESTION);
-            if      (r2 == IDYES)    { g_width = 2560; g_height = 1440; }
-            else if (r2 == IDNO)     { g_width = 1920; g_height = 1080; }
-            else                     { g_width = 1280; g_height =  720; }
-        }
-    }
-    {
-        // Object: one box covers all three choices
-        int o1 = MessageBoxA(nullptr,
-            "Add an object to the simulation?\n\n"
-            "  Yes     = Human  (person falling in, spaghettification)\n"
-            "  No      = Light ray  (photon beam toward the black hole)\n"
-            "  Cancel  = None",
-            "Add Object", MB_YESNOCANCEL | MB_ICONQUESTION);
-        if      (o1 == IDYES) g_objectType = 1;
-        else if (o1 == IDNO)  g_objectType = 2;
-        else                  g_objectType = 0;
-        g_objectPos = (g_objectType == 1)
-            ? glm::vec3(14.0f, 4.0f, 0.0f)   // human: above disk plane
-            : glm::vec3(16.0f, 6.0f, 4.0f);  // light ray: off to the side
-    }
-#else
-    {
-        std::cout << "\nSelect resolution:\n"
-                  << "  1) 1280 x 720\n"
-                  << "  2) 1920 x 1080\n"
-                  << "  3) 2560 x 1440\n"
-                  << "  4) 3840 x 2160  (default)\n"
-                  << "Enter choice [1-4]: " << std::flush;
-        std::string line;
-        std::getline(std::cin, line);
-        switch (line.empty() ? 4 : std::atoi(line.c_str())) {
-            case 1: g_width = 1280; g_height =  720; break;
-            case 2: g_width = 1920; g_height = 1080; break;
-            case 3: g_width = 2560; g_height = 1440; break;
-            default: g_width = 3840; g_height = 2160; break;
-        }
-    }
-    {
-        std::cout << "\nAdd an object to the simulation?\n"
-                  << "  1) None (default)\n"
-                  << "  2) Human  - a person falling toward the black hole\n"
-                  << "  3) Light ray - a photon beam shot toward the black hole\n"
-                  << "Enter choice [1-3]: " << std::flush;
-        std::string line;
-        std::getline(std::cin, line);
-        switch (line.empty() ? 1 : std::atoi(line.c_str())) {
-            case 2: g_objectType = 1; break;
-            case 3: g_objectType = 2; break;
-            default: g_objectType = 0; break;
-        }
-        g_objectPos = (g_objectType == 1)
-            ? glm::vec3(14.0f, 4.0f, 0.0f)
-            : glm::vec3(16.0f, 6.0f, 4.0f);
-    }
-#endif
-    std::cout << "[info] Resolution: " << g_width << " x " << g_height << "\n";
-    if (g_objectType > 0)
-        std::cout << "[info] Object: " << (g_objectType == 1 ? "Human" : "Light ray") << "\n";
-
     // ── GLFW init ──────────────────────────────────────────────────────
     if (!glfwInit()) { std::cerr << "[error] glfwInit\n"; return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -288,7 +204,7 @@ int main(int argc, char** argv) {
                                        "Schwarzschild Black Hole", nullptr, nullptr);
     if (!win) { std::cerr << "[error] Window creation failed\n"; glfwTerminate(); return 1; }
     glfwMakeContextCurrent(win);
-    glfwSwapInterval(1);   // vsync when active
+    glfwSwapInterval(1);
 
     glfwSetFramebufferSizeCallback(win, cbSize);
     glfwSetMouseButtonCallback(win,    cbBtn);
@@ -328,24 +244,15 @@ int main(int argc, char** argv) {
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);
 
-    int    prevW    = g_width, prevH = g_height;
-    double prevFPS  = glfwGetTime();
-    double lastFrame = glfwGetTime();
-    int    frames   = 0;
+    int    prevW   = g_width, prevH = g_height;
+    double prevFPS = glfwGetTime();
+    int    frames  = 0;
 
     // ── Render loop ────────────────────────────────────────────────────
     while (!glfwWindowShouldClose(win)) {
-        // Idle: sleep up to 1/24 s waiting for events (saves GPU/CPU).
-        // Active: poll immediately and let vsync cap the rate.
-        bool isIdle = (glfwGetTime() - g_lastInput > 4.0);
-        if (isIdle)
-            glfwWaitEventsTimeout(1.0 / 24.0);
-        else
-            glfwPollEvents();
+        glfwPollEvents();
 
-        double now       = glfwGetTime();
-        float  deltaTime = static_cast<float>(now - lastFrame);
-        lastFrame        = now;
+        double now = glfwGetTime();
 
         // Resize texture on window resize
         if (g_width != prevW || g_height != prevH) {
@@ -354,9 +261,8 @@ int main(int argc, char** argv) {
         }
 
         // Auto-orbit when idle (after 4 s of no interaction)
-        isIdle = (now - g_lastInput > 4.0);
-        if (isIdle) {
-            g_azimuth += 0.01745f * deltaTime;   // 1°/s, frame-rate independent
+        if (now - g_lastInput > 4.0) {
+            g_azimuth += 0.0003f;   // ~1° per second
         }
 
         // ── Camera vectors ─────────────────────────────────────────────
@@ -391,8 +297,6 @@ int main(int argc, char** argv) {
         glUniform1f (u(compProg,"uJetPower"),   g_params.jetPower);
         glUniform2fv(u(compProg,"uTurbSeed"),   1, glm::value_ptr(g_params.turbSeed));
         glUniform1f (u(compProg,"uTime"),       static_cast<float>(now));
-        glUniform1i (u(compProg,"uObjectType"), g_objectType);
-        glUniform3fv(u(compProg,"uObjectPos"), 1, glm::value_ptr(g_objectPos));
 
         int gx = (g_width  + 15) / 16;
         int gy = (g_height + 15) / 16;

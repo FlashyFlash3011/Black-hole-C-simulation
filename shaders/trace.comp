@@ -17,10 +17,6 @@ uniform vec2  uTurbSeed;     // turbulence hash offset
 // ── Animation ─────────────────────────────────────────────────────────
 uniform float uTime;
 
-// ── Objects ──────────────────────────────────────────────────────────
-uniform int   uObjectType;   // 0=none, 1=human, 2=light_ray
-uniform vec3  uObjectPos;    // world-space position of object
-
 // ═════════════════════════════════════════════════════════════════════
 // Geodesic  (Schwarzschild null geodesic, 2-D orbital-plane form)
 //
@@ -248,84 +244,6 @@ void main() {
                 float fade  = exp(-r/(18.0*uRs)) * (1.0 - exp(-r/(1.5*uRs)));
                 float pulse = 0.55 + 0.45*sin(uTime*5.2 - r*0.28);  // propagating knots
                 jetAcc += vec3(0.28, 0.52, 1.0) * prox*fade*pulse * uJetPower * dl * 2.2;
-            }
-        }
-
-        // ── Object intersection ───────────────────────────────────────
-        if (uObjectType == 1 || uObjectType == 2) {
-            vec3 rayPos = r * (cos(phi)*eR + sin(phi)*ePerp);
-
-            if (uObjectType == 1) {
-                // ── Human: tall capsule with gravitational spaghettification ──
-                // Spaghettification stretches along the radial (toward BH) axis.
-                // At r >> Rs it's normal; approaching ISCO (6M) it elongates.
-                float objDist  = length(uObjectPos);
-                float tideFrac = clamp((10.0 - objDist) / 6.0, 0.0, 1.0);
-                float stretch  = 1.0 + tideFrac * 5.0;  // up to 6x elongation
-
-                // The "up" direction for the capsule is world Y, compressed by
-                // tidal force to appear stretched vertically.
-                float capRadius = 1.2 / sqrt(stretch);   // compress cross-section
-                float capHalfH  = 2.5 * stretch;          // elongate height
-
-                vec3 delta    = rayPos - uObjectPos;
-                float yProj   = dot(delta, vec3(0,1,0));
-                vec3  yPerp   = delta - yProj * vec3(0,1,0);
-                float axisDist = length(yPerp);
-
-                // Cylinder body
-                bool hit = false;
-                vec3 hitNorm = vec3(0.0);
-                if (abs(yProj) < capHalfH && axisDist < capRadius) {
-                    hit = true;
-                    hitNorm = normalize(vec3(yPerp.x, 0.0, yPerp.z));
-                }
-                // Hemispherical caps
-                if (!hit) {
-                    vec3 topCap = uObjectPos + vec3(0,  capHalfH, 0);
-                    vec3 botCap = uObjectPos + vec3(0, -capHalfH, 0);
-                    if (length(rayPos - topCap) < capRadius) {
-                        hit = true;
-                        hitNorm = normalize(rayPos - topCap);
-                    } else if (length(rayPos - botCap) < capRadius) {
-                        hit = true;
-                        hitNorm = normalize(rayPos - botCap);
-                    }
-                }
-                if (hit) {
-                    // Simple diffuse shading from a light direction above-right
-                    vec3 lightDir = normalize(vec3(1.0, 2.0, 0.5));
-                    float diff    = max(0.15, dot(hitNorm, lightDir));
-                    // Reddish glow increases with spaghettification
-                    vec3 skinCol  = mix(vec3(0.88, 0.68, 0.48), vec3(1.0, 0.25, 0.05), tideFrac*0.6);
-                    color = skinCol * diff + coronaAcc + jetAcc;
-                    terminated = true;
-                    break;
-                }
-
-            } else {
-                // ── Light ray: wide glowing beam aimed at the black hole ──
-                vec3  beamDir   = normalize(-uObjectPos);   // toward BH
-                vec3  toRay     = rayPos - uObjectPos;
-                float tProj     = dot(toRay, beamDir);
-                if (tProj >= 0.0 && tProj <= 22.0) {
-                    vec3  closest  = uObjectPos + tProj * beamDir;
-                    float dist     = length(rayPos - closest);
-                    float beamR    = 0.55;                  // wide enough to see
-                    float haloR    = beamR * 2.5;           // soft outer glow
-                    if (dist < haloR) {
-                        float grav    = sqrt(max(0.0, 1.0 - uRs/r));
-                        float pulse   = 0.75 + 0.25 * sin(uTime * 7.0 - tProj * 0.4);
-                        // Core beam (bright white-yellow) + outer halo (blue-white)
-                        float core    = smoothstep(beamR,  0.0,   dist);
-                        float halo    = smoothstep(haloR,  beamR, dist) * 0.4;
-                        vec3  coreCol = vec3(1.0, 0.97, 0.75) * core * 5.0;
-                        vec3  haloCol = vec3(0.55, 0.75, 1.0) * halo * 2.0;
-                        color = (coreCol + haloCol) * pulse * grav + coronaAcc + jetAcc;
-                        terminated = true;
-                        break;
-                    }
-                }
             }
         }
 

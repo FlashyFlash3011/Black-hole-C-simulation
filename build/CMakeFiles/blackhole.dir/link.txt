@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -march=native CMakeFiles/blackhole.dir/src/main.cpp.o -o blackhole  -lglfw -lGLEW -lGL -lX11 -lGLU /usr/lib/x86_64-linux-gnu/libGLX.so /usr/lib/x86_64-linux-gnu/libOpenGL.so 
