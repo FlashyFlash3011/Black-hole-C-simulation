@@ -1,0 +1,261 @@
+#version 430
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba32f, binding = 0) writeonly uniform image2D uOutput;
+
+// ── Camera & integration ──────────────────────────────────────────────
+uniform ivec2 uResolution;
+uniform vec3  uCamPos, uCamFwd, uCamRight, uCamUp;
+uniform float uFov, uRs, uDiskInner, uDiskOuter, uDlambda;
+uniform int   uMaxSteps;
+
+// ── Randomised per-run ────────────────────────────────────────────────
+uniform vec3  uDiskNormal;   // arbitrary tilt; not always (0,1,0)
+uniform float uDiskTemp;     // temperature scale  [0.6, 1.8]
+uniform float uJetPower;     // jet intensity      [0, 1]
+uniform vec2  uTurbSeed;     // turbulence hash offset
+
+// ── Animation ─────────────────────────────────────────────────────────
+uniform float uTime;
+
+// ═════════════════════════════════════════════════════════════════════
+// Geodesic  (Schwarzschild null geodesic, 2-D orbital-plane form)
+//
+//  State: vec4(r, phi, rdot, phidot)
+//
+//  Exact equations of motion (derived from Christoffel symbols):
+//    d²r /dλ² = phidot² · (r − 1.5·Rs)
+//    d²phi/dλ² = −(2/r)·rdot·phidot        ← conserves L = r²·phidot
+//
+//  The factor (r − 1.5·Rs) places the unstable photon orbit exactly
+//  at r = 1.5·Rs.  No approximation is made.
+// ═════════════════════════════════════════════════════════════════════
+vec4 geoD(vec4 s) {
+    float r = max(s.x, 0.01*uRs), rd = s.z, pd = s.w;
+    return vec4(rd, pd, pd*pd*(r - 1.5*uRs), -(2.0/r)*rd*pd);
+}
+vec4 rk4(vec4 s, float dl) {
+    vec4 k1 = geoD(s);
+    vec4 k2 = geoD(s + 0.5*dl*k1);
+    vec4 k3 = geoD(s + 0.5*dl*k2);
+    vec4 k4 = geoD(s +     dl*k3);
+    return s + (dl/6.0)*(k1 + 2.0*k2 + 2.0*k3 + k4);
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// Noise / turbulence
+// ═════════════════════════════════════════════════════════════════════
+float h21(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p + 19.19);
+    return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f*f*(3.0 - 2.0*f);
+    return mix(mix(h21(i), h21(i+vec2(1,0)), f.x),
+               mix(h21(i+vec2(0,1)), h21(i+vec2(1,1)), f.x), f.y);
+}
+// 4-octave FBM — creates MRI-like turbulent hot spots
+float fbm(vec2 p) {
+    float v = 0.0, a = 0.5;
+    mat2  m = mat2(1.6, 1.2, -1.2, 1.6);  // rotation+scale, prevents grid artefacts
+    for (int i = 0; i < 4; i++) { v += a*vnoise(p); p = m*p; a *= 0.5; }
+    return v;
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// Procedural star field (3 octaves, spectral colours)
+// ═════════════════════════════════════════════════════════════════════
+vec3 starfield(vec3 dir) {
+    float theta = acos(clamp(dir.y, -1.0, 1.0));
+    float phi   = atan(dir.z, dir.x);
+    vec2  sp    = vec2(theta, phi);
+    vec3  col   = vec3(0.003, 0.004, 0.014);
+    for (int oct = 0; oct < 3; oct++) {
+        float sc = 52.0 * pow(3.3, float(oct));
+        vec2 uv = sp*sc, cell = floor(uv), fc = fract(uv);
+        for (int dy = 0; dy <= 1; dy++) for (int dx = 0; dx <= 1; dx++) {
+            vec2 nc = cell + vec2(dx, dy);
+            if (h21(nc) > 0.974) {
+                vec2  sv = vec2(h21(nc+vec2(3.7,11.3)), h21(nc+vec2(17.1,5.9)));
+                float d  = length(fc - (sv + vec2(dx,dy)));
+                float b  = smoothstep(0.055, 0.0, d) * (0.25+0.75*h21(nc+vec2(23.0,7.0)));
+                col += b * mix(vec3(1.0,0.72,0.38), vec3(0.62,0.79,1.0), h21(nc+vec2(5.0,31.0)));
+            }
+        }
+    }
+    return col;
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// Accretion disk emission
+//   Animated via Keplerian rotation + FBM turbulence (MRI proxy).
+//   Colours follow Novikov-Thorne temperature profile.
+//   Doppler beaming: approaching side boosted by (1+v·cos θ)³.
+//   Gravitational redshift: sqrt(1 − Rs/r).
+// ═════════════════════════════════════════════════════════════════════
+vec3 diskEmission(vec3 hitPos, float r, float doppler) {
+    float tNorm = clamp((r - uDiskInner)/(uDiskOuter - uDiskInner), 0.0, 1.0);
+
+    // Keplerian angular velocity: omega = sqrt(Rs / (2 r³))
+    float omega  = sqrt(max(0.0, uRs / (2.0*r*r*r)));
+    float phi_w  = atan(hitPos.z, hitPos.x);
+    float phi_m  = phi_w - omega*uTime;              // material co-rotating frame
+
+    // FBM turbulence in (log r, phi) disk coordinates
+    vec2  tc   = vec2(log(r)*2.3, phi_m*1.8) + uTurbSeed;
+    float turb = fbm(tc);
+    float tMod = 0.45 + 1.10*turb;                  // ±~40 % temperature fluctuation
+    float spot = smoothstep(0.70, 0.96, turb)*3.0;  // occasional hot spots
+
+    // Temperature: hot inner (blue-white) → cool outer (deep red)
+    float t = clamp(pow(1.0 - tNorm, 1.5) * uDiskTemp * tMod, 0.0, 2.6);
+    vec3 hotC  = vec3(1.0, 0.95, 0.88)*1.6;
+    vec3 midC  = vec3(1.0, 0.52, 0.14);
+    vec3 coolC = vec3(0.65, 0.08, 0.02);
+    vec3 base  = t > 1.0 ? mix(midC, hotC,   t - 1.0)
+               : t > 0.5 ? mix(coolC, midC, (t - 0.5)*2.0)
+               :            coolC * (t*2.0);
+    base += spot * vec3(1.3, 0.85, 0.5);
+
+    // Relativistic Doppler beaming: v = sqrt(Rs/(2r))
+    float v     = sqrt(max(0.0, uRs/(2.0*r)));
+    float boost = pow(clamp(1.0 + doppler*v, 0.01, 6.0), 3.0);
+
+    // Luminosity + gravitational redshift
+    float lum  = (1.0 - tNorm) * (0.15 + 0.85*pow(1.0-tNorm, 0.5));
+    float grav = sqrt(max(0.0, 1.0 - uRs/r));
+
+    return base * lum * boost * grav * 3.8;
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// Main
+// ═════════════════════════════════════════════════════════════════════
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= uResolution.x || coord.y >= uResolution.y) return;
+
+    float aspect = float(uResolution.x) / float(uResolution.y);
+    vec2  ndc    = (vec2(coord) + 0.5) / vec2(uResolution) * 2.0 - 1.0;
+
+    vec3 rayDir = normalize(uCamFwd
+                          + ndc.x*aspect*tan(uFov)*uCamRight
+                          + ndc.y*       tan(uFov)*uCamUp);
+
+    // ── Orbital-plane basis ───────────────────────────────────────────
+    vec3  eR   = normalize(uCamPos);
+    vec3  perp = rayDir - dot(rayDir, eR)*eR;
+    float pLen = length(perp);
+
+    if (pLen < 1e-5) {               // purely-radial (centre pixel) fast path
+        vec3 col = dot(rayDir, eR) < 0.0 ? vec3(0.0) : starfield(rayDir);
+        imageStore(uOutput, coord, vec4(max(col, vec3(0.0)), 1.0));
+        return;
+    }
+    vec3 ePerp = perp / pLen;
+
+    // ── Precompute disk-normal projections ────────────────────────────
+    float eRdN = dot(eR,    uDiskNormal);
+    float ePdN = dot(ePerp, uDiskNormal);
+
+    // ── Initial state ─────────────────────────────────────────────────
+    float r0   = length(uCamPos);
+    vec4  state = vec4(r0, 0.0, dot(rayDir, eR), dot(rayDir, ePerp)/r0);
+
+    float diskPrev = r0 * eRdN;          // signed height above disk at lambda=0
+
+    vec3 color     = vec3(0.0);
+    vec3 coronaAcc = vec3(0.0);
+    vec3 jetAcc    = vec3(0.0);
+    bool terminated = false;
+
+    for (int i = 0; i < uMaxSteps; i++) {
+        float r   = state.x;
+        float phi = state.y;
+
+        // ── Event horizon ─────────────────────────────────────────────
+        if (r <= uRs * 1.001) {
+            color      = coronaAcc;   // faint corona glow visible even at horizon
+            terminated = true;
+            break;
+        }
+
+        float dl   = uDlambda * clamp(r/uRs, 0.08, 10.0);
+        vec4  next = rk4(state, dl);
+        float rN   = next.x;
+        float phiN = next.y;
+
+        // ── Escape ────────────────────────────────────────────────────
+        if (rN > 88.0*uRs) {
+            vec3 exitDir = normalize(next.z*eR + rN*next.w*ePerp);
+            vec3 bg      = starfield(exitDir);
+
+            // Relativistic jets along disk-normal axis
+            if (uJetPower > 0.01) {
+                float jd   = abs(dot(exitDir, uDiskNormal));
+                float jStr = smoothstep(0.968, 0.997, jd);
+                if (jStr > 0.0) {
+                    // Animated knots propagating outward along jet
+                    float knot = 0.65 + 0.35*sin(uTime*4.5 - 18.0*(1.0-jd));
+                    vec3  jCol = mix(vec3(0.25, 0.45, 1.0), vec3(0.88, 0.94, 1.0), jStr)*knot;
+                    bg = mix(bg, jCol * uJetPower*5.5, jStr);
+                }
+            }
+            color      = bg + jetAcc + coronaAcc;
+            terminated = true;
+            break;
+        }
+
+        // ── Disk intersection (signed distance to disk plane) ─────────
+        float diskCurr = rN*(cos(phiN)*eRdN + sin(phiN)*ePdN);
+        if (diskPrev * diskCurr < 0.0) {
+            float tc   = diskPrev / (diskPrev - diskCurr);
+            float rC   = mix(r,        rN,   tc);
+            float phiC = mix(state.y,  phiN, tc);
+            if (rC >= uDiskInner && rC <= uDiskOuter) {
+                vec3 hPos  = rC * (cos(phiC)*eR + sin(phiC)*ePerp);
+                // Orbital velocity: tangent in disk plane (CCW from +diskNormal)
+                vec3 dR    = normalize(hPos - dot(hPos, uDiskNormal)*uDiskNormal);
+                vec3 vOrb  = cross(uDiskNormal, dR);
+                float rdH  = mix(state.z, next.z, tc);
+                float pdH  = mix(state.w, next.w, tc);
+                vec3 phDir = normalize(-(rdH*eR + rC*pdH*ePerp));   // toward camera
+                float dop  = dot(vOrb, phDir);
+                color      = diskEmission(hPos, rC, dop) + jetAcc + coronaAcc;
+                terminated = true;
+                break;
+            }
+        }
+
+        // ── Hot corona (diffuse warm glow near BH) ────────────────────
+        if (r < 5.2*uRs) {
+            float cosN  = cos(phi)*eRdN + sin(phi)*ePdN;
+            float cDens = exp(-r/(2.8*uRs)) * exp(-abs(cosN)*2.8);
+            coronaAcc  += vec3(0.95, 0.45, 0.12) * cDens * dl * uDiskTemp * 0.07;
+        }
+
+        // ── Volumetric jet beam ───────────────────────────────────────
+        if (uJetPower > 0.01 && r < 32.0*uRs) {
+            float cosN  = abs(cos(phi)*eRdN + sin(phi)*ePdN);
+            float sinN2 = max(0.0, 1.0 - cosN*cosN);
+            if (sinN2 < 0.006) {
+                float prox  = smoothstep(0.006, 0.0, sinN2);
+                float fade  = exp(-r/(18.0*uRs)) * (1.0 - exp(-r/(1.5*uRs)));
+                float pulse = 0.55 + 0.45*sin(uTime*5.2 - r*0.28);  // propagating knots
+                jetAcc += vec3(0.28, 0.52, 1.0) * prox*fade*pulse * uJetPower * dl * 2.2;
+            }
+        }
+
+        state    = next;
+        diskPrev = diskCurr;
+    }
+
+    if (!terminated) {
+        vec3 exitDir = normalize(state.z*eR + state.x*state.w*ePerp);
+        color = starfield(exitDir) + jetAcc + coronaAcc;
+    }
+
+    // Write raw linear-HDR values; tone-map + bloom happen in quad.frag
+    imageStore(uOutput, coord, vec4(max(color, vec3(0.0)), 1.0));
+}
