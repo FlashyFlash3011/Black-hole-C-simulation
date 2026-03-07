@@ -1,178 +1,148 @@
 # Black Hole Renderer
 
-A real-time Schwarzschild black hole renderer in C++ using OpenGL 4.3 compute shaders.
-Every run produces a unique, physically grounded render — randomized physics parameters, no two runs alike.
+A real-time Schwarzschild black hole renderer using OpenGL 4.3 compute shaders. Photon paths are traced through curved spacetime one per pixel, entirely on the GPU. Every run randomizes the physics parameters and produces a unique result.
+
+![black hole render](https://i.imgur.com/placeholder.png)
+<!-- Replace with an actual screenshot before publishing -->
 
 ---
 
-## What It Does
+## Features
 
-Simulates a non-rotating (Schwarzschild) black hole with a turbulent accretion disk, relativistic jets,
-and a lensed star field. Photon paths are traced backward from the camera through curved spacetime using
-exact null geodesics. All visual output follows from the physics — nothing is faked.
-
-Real-time interactive window at 3840x2160 with orbit/zoom controls.
+- Exact Schwarzschild null geodesics integrated via RK4, one per pixel on the GPU
+- Novikov-Thorne accretion disk with Keplerian rotation, Doppler beaming, and gravitational redshift
+- FBM turbulence (MRI proxy) animating the disk in real time — hot spots, spiral density waves, flares
+- Relativistic jets with animated propagating knots (~60% of runs)
+- Hot X-ray corona accumulated volumetrically near the event horizon
+- Gravitationally lensed procedural star field with physically accurate spectral colors
+- All parameters randomized per run within physically valid ranges; any render is reproducible by seed
 
 ---
 
 ## Physics
 
-### Spacetime — Schwarzschild Metric
+### Schwarzschild Geometry
 
-Non-rotating black hole. In geometric units (G = c = M = 1):
+Non-rotating black hole in geometric units (G = c = M = 1):
 
-- Schwarzschild radius: `Rs = 2M = 2`
-- ISCO (inner disk edge): `r = 6M = 3 Rs`
-- Photon sphere: `r = 1.5 Rs` (unstable photon orbits — creates the bright ring)
+| Radius | Value | Significance |
+|---|---|---|
+| Event horizon | `r = 2M` | Ray crosses → black |
+| Photon sphere | `r = 3M` | Unstable photon orbits → bright ring |
+| ISCO | `r = 6M` | Inner edge of accretion disk |
 
-### Ray Tracing — Null Geodesics
+### Geodesic Integration
 
-Rays are traced backward from the camera (one per pixel). Each follows a Schwarzschild null geodesic,
-integrated numerically in the orbital plane using 4th-order Runge-Kutta (RK4):
-
-```
-d²r/dλ²   = φ̇² · (r − 1.5 Rs)
-d²φ/dλ²   = −(2/r) · ṙ · φ̇         ← conserves angular momentum L = r²φ̇
-```
-
-No approximations. Step size adapts to local curvature (smaller near the horizon).
-
-For each pixel:
-- Ray escapes to infinity → sample procedural star field (gravitationally lensed)
-- Ray hits accretion disk → compute disk emission at that point
-- Ray crosses event horizon → black
-
-### Accretion Disk — Novikov-Thorne Temperature Profile
-
-The disk spans from ISCO to a randomized outer radius. Temperature decreases outward:
+Rays are cast backward from the camera. Each follows the exact Schwarzschild null geodesic in the orbital plane:
 
 ```
-T(r) ∝ (1 − sqrt(r_ISCO / r))^0.25 · r^−0.75
+d²r/dλ²  = φ̇² (r − 3M)      ← photon sphere at r = 3M, no approximation
+d²φ/dλ²  = −(2/r) ṙ φ̇       ← conserves angular momentum L = r²φ̇
 ```
 
-Each point emits as a blackbody. Color runs from blue-white near the ISCO to deep red at the outer edge.
+Integrated with RK4. Step size adapts to curvature — finer near the horizon, coarser far away.
 
-### Relativistic Effects on the Disk
+### Disk Emission
 
-- **Doppler beaming**: approaching side dramatically brighter (boost ∝ (1 + v cos θ)³), receding side dimmer
-- **Gravitational redshift**: photons climbing out of the gravity well lose energy — `sqrt(1 − Rs/r)`
-- **Disk tilt**: the disk plane is randomized each run — produces asymmetric lensing geometry
+Temperature follows the Novikov-Thorne profile:
 
-### Turbulence — MRI Proxy
+```
+T(r) ∝ (1 − √(r_ISCO / r))^0.25 · r^−0.75
+```
 
-Real accretion disks are driven turbulent by the magnetorotational instability (MRI).
-Modeled via 4-octave FBM (fractal Brownian motion) noise seeded per run, applied in Keplerian co-rotating
-coordinates. Produces hot spots, spiral density waves, and flares — different every run.
+Color runs blue-white at the ISCO to deep red at the outer edge. Modulated by FBM turbulence (±40% temperature fluctuation) in Keplerian co-rotating coordinates.
 
-The disk co-rotates: material follows Keplerian orbits (`Ω = sqrt(Rs / (2r³))`), and turbulent structures
-animate with it in real time.
+Relativistic corrections applied per disk hit:
+- **Doppler beaming** — approaching side boosted by `(1 + v cos θ)³`, receding side dimmed
+- **Gravitational redshift** — `√(1 − 2M/r)` applied to emitted energy
 
-### Relativistic Jets
+### Randomized Parameters
 
-Jets appear along the disk-normal axis when `jetPower > 0` (~60% of runs). Power follows the
-Blandford-Znajek-like scaling rendered as collimated volumetric beams with animated propagating knots.
-Jet emission is accumulated volumetrically as the ray passes through the beam region.
+| Parameter | Range | Effect |
+|---|---|---|
+| Disk tilt | 10° – 55° | Disk plane orientation and lensing geometry |
+| Tilt azimuth | 0° – 360° | Axis of tilt |
+| Disk outer radius | 13 – 28 M | Disk extent |
+| Temperature scale | 0.65 – 1.75 | Overall color temperature |
+| Jet power | 0 or 0.35 – 1.0 | Jet intensity (60% chance per run) |
+| Turbulence seed | random | MRI hot spot pattern |
 
-### Hot Corona
-
-A diffuse, warm X-ray corona is accumulated near the black hole (`r < 5.2 Rs`), contributing a faint
-ambient glow visible even toward the event horizon.
-
-### Star Field
-
-Procedural star field covering the full sky sphere. Stars have physically motivated spectral colors
-(O/B/A/F/G/K/M types via a log-uniform brightness distribution). Gravitationally lensed by the
-Schwarzschild geometry — multiple images and Einstein rings appear near the photon sphere.
+The seed is printed to the terminal on every run. Pass it as a command-line argument to reproduce any render exactly.
 
 ---
 
-## Randomized Parameters (per run)
+## Requirements
 
-| Parameter         | Range          | Effect                                              |
-|-------------------|----------------|-----------------------------------------------------|
-| Disk tilt         | 10° – 55°      | Disk plane orientation — changes lensing geometry   |
-| Tilt azimuth      | 0° – 360°      | Rotation of tilt axis                               |
-| Disk outer radius | 13 – 28 M      | Disk size                                           |
-| Disk temperature  | 0.65 – 1.75    | Color temperature scale (bluer vs. redder disk)     |
-| Jet power         | 0 or 0.35–1.0  | Jet intensity (60% chance of jets per run)          |
-| Turbulence seed   | random vec2    | MRI hot spot pattern                                |
-
-A seed is printed to the terminal on each run. Pass it as a command-line argument to reproduce any render.
+- Windows 10/11
+- [MSYS2](https://www.msys2.org/) with the UCRT64 toolchain
+- A GPU with OpenGL 4.3 support (any modern discrete GPU)
 
 ---
 
-## Architecture
+## Building
 
+Open the **MSYS2 UCRT64** terminal (not MINGW64, not the default MSYS terminal).
+
+**Install dependencies** (one time):
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc \
+          mingw-w64-ucrt-x86_64-cmake \
+          mingw-w64-ucrt-x86_64-ninja \
+          mingw-w64-ucrt-x86_64-glfw \
+          mingw-w64-ucrt-x86_64-glew \
+          mingw-w64-ucrt-x86_64-glm
 ```
-BlackholeSimC++/
-├── src/
-│   └── main.cpp          -- entry point: GLFW window, camera, render loop, parameter sampling
-├── shaders/
-│   ├── trace.comp        -- OpenGL 4.3 compute shader: geodesic integration, disk/jet/star emission
-│   ├── quad.vert         -- full-screen triangle (no VBO, gl_VertexID trick)
-│   └── quad.frag         -- ACES tone mapping + approximate bloom
-└── CMakeLists.txt
+
+**Build:**
+
+```bash
+cd "C:/Users/yourname/path/to/BlackholeSimC++"
+cmake -B build-win -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win
 ```
 
-### Rendering Pipeline
+**Run:**
 
-1. CPU samples random physics parameters, sets up camera vectors
-2. OpenGL compute shader (`trace.comp`) dispatches 16×16 thread groups — one invocation per pixel
-3. Each invocation: generate ray → integrate geodesic (RK4) → evaluate disk/jet/corona/star emission → write HDR pixel
-4. Fragment shader blits the HDR texture to screen with ACES filmic tone mapping and approximate bloom
-5. GLFW swaps buffers; FPS displayed in window title
+```bash
+./build-win/blackhole.exe            # random seed
+./build-win/blackhole.exe 123456789  # reproduce a specific run
+```
 
-### GPU
-
-OpenGL 4.3 compute shaders. Tested on AMD RX 9070 XT under WSL2 (Mesa RADV).
-16×16 thread groups. All geodesic integration runs on-GPU, one shader invocation per pixel.
-
-### Resolution
-
-Default: 3840×2160 (4K). Resizable — texture reallocates on window resize.
-At 4K: ~8.3M geodesics computed per frame.
+Or double-click `blackhole.exe` in Explorer — note the terminal window (showing the seed and parameters) will open alongside it.
 
 ---
 
 ## Controls
 
-| Input           | Action                                   |
-|-----------------|------------------------------------------|
-| Left-drag       | Orbit camera around black hole           |
-| Scroll          | Zoom in / out                            |
-| `R`             | Randomize all parameters (new render)    |
-| `ESC`           | Quit                                     |
-| Idle (4s)       | Auto-orbit begins                        |
+| Input | Action |
+|---|---|
+| Left-drag | Orbit camera around the black hole |
+| Scroll wheel | Zoom in / out |
+| `R` | Randomize all parameters (new render) |
+| `ESC` | Quit |
+
+After 4 seconds of no input, the camera begins auto-orbiting slowly.
 
 ---
 
-## Dependencies
+## Project Structure
 
-- C++17
-- OpenGL 4.3+
-- GLFW3
-- GLEW
-- GLM (header-only)
-- CMake 3.18+
-
-Install on Ubuntu / WSL2:
-
-```bash
-sudo apt install libglfw3-dev libglew-dev libglm-dev cmake build-essential
 ```
+BlackholeSimC++/
+├── src/
+│   └── main.cpp        -- window, camera, parameter sampling, render loop
+├── shaders/
+│   ├── trace.comp      -- OpenGL 4.3 compute shader: geodesic + disk/jet/star emission
+│   ├── quad.vert       -- full-screen triangle (gl_VertexID trick, no VBO)
+│   └── quad.frag       -- ACES filmic tone mapping + approximate bloom
+└── CMakeLists.txt
+```
+
+The compute shader dispatches 16×16 thread groups — one invocation per pixel. The entire geodesic integration loop runs on-GPU. The CPU only sets uniforms and swaps buffers.
 
 ---
 
-## Build & Run
+## License
 
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-./build/blackhole              # random seed each run
-./build/blackhole 123456789    # reproduce a specific run by seed
-```
-
-Platform notes:
-- WSL2: requires a working Vulkan/OpenGL driver visible to WSL. Mesa RADV works for AMD GPUs.
-  Verify with `glxinfo | grep "OpenGL version"` — need 4.3+.
-- Native Linux: works with any OpenGL 4.3-capable driver.
+MIT

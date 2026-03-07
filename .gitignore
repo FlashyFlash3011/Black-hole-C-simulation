@@ -1,5 +1,7 @@
 build/
+build-win/
 *.o
 *.d
 .cache/
 compile_commands.json
+.claude/
