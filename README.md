@@ -2,8 +2,14 @@
 
 A real-time Schwarzschild black hole renderer using OpenGL 4.3 compute shaders. Photon paths are traced through curved spacetime one per pixel, entirely on the GPU. Every run randomizes the physics parameters and produces a unique result.
 
-![black hole render](https://i.imgur.com/placeholder.png)
-<!-- Replace with an actual screenshot before publishing -->
+<p align="center">
+  <img src="MediaForRepo/BlackholeRenderGif.gif" alt="Black hole simulation" width="800"/>
+</p>
+
+<p align="center">
+  <img src="MediaForRepo/Screenshot 2026-03-07 123103.png" width="49%"/>
+  <img src="MediaForRepo/Screenshot 2026-03-07 123113.png" width="49%"/>
+</p>
 
 ---
 
