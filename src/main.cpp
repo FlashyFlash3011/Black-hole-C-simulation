@@ -244,15 +244,18 @@ int main(int argc, char** argv) {
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);
 
-    int    prevW   = g_width, prevH = g_height;
-    double prevFPS = glfwGetTime();
-    int    frames  = 0;
+    int    prevW    = g_width, prevH = g_height;
+    double prevFPS  = glfwGetTime();
+    double lastFrame = glfwGetTime();
+    int    frames   = 0;
 
     // ── Render loop ────────────────────────────────────────────────────
     while (!glfwWindowShouldClose(win)) {
         glfwPollEvents();
 
-        double now = glfwGetTime();
+        double now       = glfwGetTime();
+        float  deltaTime = static_cast<float>(now - lastFrame);
+        lastFrame        = now;
 
         // Resize texture on window resize
         if (g_width != prevW || g_height != prevH) {
@@ -262,7 +265,7 @@ int main(int argc, char** argv) {
 
         // Auto-orbit when idle (after 4 s of no interaction)
         if (now - g_lastInput > 4.0) {
-            g_azimuth += 0.0003f;   // ~1° per second
+            g_azimuth += 0.01745f * deltaTime;   // 1°/s, frame-rate independent
         }
 
         // ── Camera vectors ─────────────────────────────────────────────
