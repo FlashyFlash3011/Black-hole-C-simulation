@@ -1,7 +1,24 @@
+# Build artifacts
 build/
-build-win/
 *.o
-*.d
-.cache/
-compile_commands.json
+*.so
+*.a
+*.out
+
+# Output files
+*.ppm
+*.png
+*.jpg
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Claude Code (machine-specific)
 .claude/
+CLAUDE.md
+
+# System
+.DS_Store
+Thumbs.db

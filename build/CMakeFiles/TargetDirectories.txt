@@ -1,3 +1,0 @@
-/home/ethan/projects/blackhole/build/CMakeFiles/blackhole.dir
-/home/ethan/projects/blackhole/build/CMakeFiles/edit_cache.dir
-/home/ethan/projects/blackhole/build/CMakeFiles/rebuild_cache.dir
