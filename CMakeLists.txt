@@ -25,7 +25,7 @@ if(NOT GLM_INCLUDE_DIR)
 endif()
 
 # --- Executable ---
-add_executable(blackhole src/main.cpp)
+add_executable(blackhole shaders/main.cpp)
 
 target_include_directories(blackhole PRIVATE
     ${GLFW3_INCLUDE_DIRS}
